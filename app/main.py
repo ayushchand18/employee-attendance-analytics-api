@@ -57,6 +57,11 @@ def create_indexes():
         name="idx_employees_department_joined"
     )
 
+    db.employees.create_index(
+        [("joined_on", 1)],
+        name="idx_employees_joined_on"
+    )
+
     db.attendance_logs.create_index(
         [("date", 1), ("late_minutes", 1)],
         name="idx_attendance_date_late"
@@ -410,6 +415,21 @@ def punch_out(body: PunchOutIn):
             "punch_out": None,
         }
     )
+
+    if record is None and is_overnight:
+        # A punch-out shortly after the overnight shift ends belongs
+        # to the prior day's attendance record.
+        previous_date = (attendance_day - timedelta(days=1)).isoformat()
+        previous_record = db.attendance_logs.find_one(
+            {
+                "emp_code": body.emp_code,
+                "date": previous_date,
+                "punch_out": None,
+            }
+        )
+        if previous_record is not None:
+            record = previous_record
+            attendance_date = previous_date
 
     if record is None:
         existing = db.attendance_logs.find_one(
@@ -794,12 +814,6 @@ def regularize_attendance(
                 "to": new_value,
             }
 
-    if not changes:
-        raise HTTPException(
-            status_code=422,
-            detail="The request does not change the record",
-        )
-
     history_entry = {
         "at": epoch_ms(datetime.now(timezone.utc).replace(microsecond=0)),
         "by": body.regularized_by,
@@ -814,12 +828,6 @@ def regularize_attendance(
         "punch_out": old_out,
     }
 
-    # Compare the old history as part of the update to prevent lost edits.
-    if "history" in record:
-        update_filter["history"] = record["history"]
-    else:
-        update_filter["history"] = {"$exists": False}
-
     updated = db.attendance_logs.find_one_and_update(
         update_filter,
         {
@@ -830,10 +838,9 @@ def regularize_attendance(
     )
 
     if updated is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Attendance record changed concurrently; retry the request",
-        )
+        # Re-read and recompute against the latest record. This avoids
+        # losing concurrent regularization history entries.
+        return regularize_attendance(emp_code, date, body)
 
     return serialize_attendance(updated)
 
