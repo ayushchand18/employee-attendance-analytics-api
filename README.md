@@ -1,5 +1,3 @@
-# Candidate kit
-
 # Employee Attendance & Analytics API
 
 A FastAPI application for employee management, attendance tracking, attendance regularization, and analytics using MongoDB.
