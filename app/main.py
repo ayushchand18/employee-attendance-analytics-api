@@ -362,31 +362,9 @@ def punch_in(body: PunchInIn):
         "overtime_minutes": doc["overtime_minutes"],
         "history": doc["history"],
     }
+
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):
-    record = db.attendance_logs.find_one(
-        {
-            "emp_code": body.emp_code,
-            "punch_out": None,
-        }
-    )
-
-    if record is None:
-        existing = db.attendance_logs.find_one(
-            {"emp_code": body.emp_code}
-        )
-
-        if existing is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Attendance record not found",
-            )
-
-        raise HTTPException(
-            status_code=409,
-            detail="Employee has already punched out",
-        )
-
     if body.punched_at is None:
         ts = datetime.now(timezone.utc).replace(microsecond=0)
     else:
@@ -394,6 +372,59 @@ def punch_out(body: PunchOutIn):
             body.punched_at / 1000,
             tz=timezone.utc,
         ).replace(microsecond=0)
+
+    emp = db.employees.find_one({"emp_code": body.emp_code})
+
+    if emp is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Employee not found",
+        )
+
+    local_ts = ts.astimezone(IST)
+    start_hour, start_minute = map(int, emp["shift_start"].split(":"))
+    end_hour, end_minute = map(int, emp["shift_end"].split(":"))
+
+    start_minutes = start_hour * 60 + start_minute
+    end_minutes = end_hour * 60 + end_minute
+    local_minutes = local_ts.hour * 60 + local_ts.minute
+
+    is_overnight = end_minutes <= start_minutes
+
+    if is_overnight and local_minutes <= end_minutes:
+        attendance_day = local_ts.date() - timedelta(days=1)
+    else:
+        attendance_day = local_ts.date()
+
+    attendance_date = attendance_day.isoformat()
+
+    record = db.attendance_logs.find_one(
+        {
+            "emp_code": body.emp_code,
+            "date": attendance_date,
+            "punch_out": None,
+        }
+    )
+
+    if record is None:
+        existing = db.attendance_logs.find_one(
+            {
+                "emp_code": body.emp_code,
+                "date": attendance_date,
+            }
+        )
+
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Attendance record not found for this date",
+            )
+
+        raise HTTPException(
+            status_code=409,
+            detail="Employee has already punched out",
+        )
+
 
     punch_in_ts = record["punch_in"]
 
@@ -405,9 +436,6 @@ def punch_out(body: PunchOutIn):
             status_code=422,
             detail="Punch-out must be after punch-in",
         )
-
-    emp = db.employees.find_one({"emp_code": body.emp_code})
-
 
     overtime_minutes = compute_overtime(
         ts,
